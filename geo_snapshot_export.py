@@ -9,17 +9,6 @@ The HTML uses inline JavaScript (per R&D "EXTRA FROM THE DEVS") to toggle
 between distance groupings and chart variants — all figures are pre-rendered
 and toggled via JS visibility.
 
-Supported interactive toggles (matching geo_dashboard.py):
-  - Distance Grouping: 6 Distance Bands / 3 Geo Tiers
-  - Volume Metric: Customers / Revenue / SpC
-  - Activation Mode: Weekly / Cumulative
-  - Map Metric: Customers / Rev per 1k Pop / Activation
-  - Customer Type: All / FTB / RB
-  - Renewals: Include / Exclude
-
-Informational (static — shown but not interactive):
-  - House selection, Event Category, Date Range
-
 Usage (run from the data_analyst_repository folder, or pass --dashboard-dir):
 
     python geo_snapshot_export.py                  # uses cached parquet
@@ -64,6 +53,18 @@ def _import_dashboard(dashboard_path: Path):
 
     spec = importlib.util.spec_from_file_location('geo_dashboard', dashboard_path)
     mod = importlib.util.module_from_spec(spec)
+
+    # The module-level code calls st.set_page_config, st.markdown, st.sidebar, etc.
+    # Our mock absorbs all of these. But it also calls load_data() etc. which need
+    # real data — we'll suppress those by catching errors in module-level code.
+    # Actually, module-level code after the function defs will fail because it
+    # tries to call load_data() which needs parquet/BQ. We need to stop execution
+    # at that point. We do this by patching sys.argv to NOT include --refresh,
+    # and making sure parquet caches exist.
+
+    # Actually, simpler: just exec only the function/class definitions, not the
+    # app code. We'll load the source, split at the "# App" marker, and exec
+    # only the top portion.
 
     source = dashboard_path.read_text(encoding='utf-8')
     marker = '# =============================================================================\n# App\n# ============================================================================='
@@ -176,185 +177,121 @@ def ensure_map_caches(geo, df, dashboard_dir: Path):
     city_df = city_df.merge(txn_city, on='city', how='left')
     city_df['customers'] = city_df['customers'].fillna(0).astype(int)
     city_df['revenue'] = city_df['revenue'].fillna(0)
-    city_df['spc'] = (city_df['revenue'] / city_df['customers'].replace(0, float('nan'))).fillna(0).round(2)
+    city_df['spc'] = (city_df['revenue'] / city_df['customers'].replace(0, np.nan)).fillna(0).round(2)
     city_df.to_parquet(city_cache, index=False)
     print(f"    Written {city_cache.name} ({len(city_df)} rows)")
 
 
 # =============================================================================
-# 3. Generate all chart figures for every filter combination
+# 3. Generate all chart figures using the real chart functions
 # =============================================================================
 
-FTB_OPTIONS = [('All', 'all'), ('FTB', 'ftb'), ('RB', 'rb')]
-RENEWAL_OPTIONS = [('Include', 'incl'), ('Exclude', 'excl')]
-
-
 def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = None):
-    """Call every chart function from geo_dashboard for all filter combos and return named figures."""
-    import numpy as np
+    """Call every chart function from geo_dashboard and return named figures."""
+    figures = {}
 
     # Load data using the dashboard's own loaders
     df = geo.load_data(refresh=refresh)
     all_houses_df = geo.load_all_houses(refresh=refresh)
     house_pop_df = geo.load_house_population(refresh=refresh)
 
+    # No filters applied (full dataset) — mirrors dashboard defaults
+    dff = df.copy()
+    dff_all = df.copy()
+    dff_base = df.copy()
+
     # Build map caches if missing
     if dashboard_dir:
         ensure_map_caches(geo, df, dashboard_dir)
 
+    # Maps (Section 1)
     plz_map_df = geo.load_plz_map_data()
     city_map_df = geo.load_city_map_data()
 
-    # Metadata for sidebar info display
-    house_list = geo.get_house_order(df)
-    event_cats = sorted(df['event_category'].dropna().unique().tolist())
-    date_min = df['created_at'].min().strftime('%d %b %Y')
-    date_max = df['created_at'].max().strftime('%d %b %Y')
-    meta = {
-        'houses': house_list,
-        'event_cats': event_cats,
-        'date_min': date_min,
-        'date_max': date_max,
-    }
-
-    figures = {}
-    city_tables = {}
-
-    # ── Maps (Section 1) — generated once, shared across all filter combos ──
-    # Maps use the full dataset (no FTB/RB or renewals filter) to keep
-    # the page lightweight (4 mapbox GL instances instead of 24).
-    print("  Generating maps (shared across filters)...")
     if city_map_df is not None:
-        figures['city_map_pop'] = geo.chart_city_map(
-            city_map_df, all_houses_df, metric='population')
+        figures['city_map_pop'] = geo.chart_city_map(city_map_df, all_houses_df, metric='population')
 
     if plz_map_df is not None:
         for m in ['customers', 'rev_per_1k', 'activation']:
             figures[f'plz_map_{m}'] = geo.chart_population_map(
-                plz_map_df, all_houses_df, metric=m, filtered_df=df)
+                plz_map_df, all_houses_df, metric=m, filtered_df=dff
+            )
 
-    # ── Charts per filter combination ──
-    for ftb_label, ftb_tag in FTB_OPTIONS:
-        for ren_label, ren_tag in RENEWAL_OPTIONS:
-            suffix = f'__{ftb_tag}__{ren_tag}'
-            print(f"  Generating charts for Customer Type={ftb_label}, Renewals={ren_label}...")
+    # Section 2: Local Impact — both color modes × multiple metrics
+    for cm in ['6 Distance Bands', '3 Geo Tiers']:
+        tag = '6band' if '6' in cm else '3tier'
 
-            # Apply filters — mirrors geo_dashboard.py lines 1200-1210
-            dff = df.copy()
-            dff_all = df.copy()      # no FTB/RB filter — for FTS% & LTV cohort
-            dff_base = df.copy()     # no FTB/RB, no event — for LTV revenue
+        figures[f'comp_pct_{tag}'] = geo.chart_1_pct(dff, cm, df_all=dff_all, df_base=dff_base)
 
-            if ftb_label != 'All':
-                dff = dff[dff['ftb_rb'] == ftb_label]
+        for metric in ['customers', 'revenue', 'spc']:
+            figures[f'comp_{metric}_{tag}'] = geo.chart_1_abs(
+                dff, cm, metric=metric, df_all=dff_all, df_base=dff_base
+            )
 
-            if ren_label == 'Exclude':
-                dff = dff[dff['is_renewal'] != 1]
-                dff_all = dff_all[dff_all['is_renewal'] != 1]
-                dff_base = dff_base[dff_base['is_renewal'] != 1]
+        figures[f'fts_{tag}'] = geo.chart_acq_metric(dff, cm, metric='fts_pct', df_all=dff_all, df_base=dff_base)
+        figures[f'ltv_{tag}'] = geo.chart_acq_metric(dff, cm, metric='ltv', df_all=dff_all, df_base=dff_base)
 
-            if dff.empty:
-                print(f"    Skipping (no data for {ftb_label} / {ren_label})")
-                continue
+    # Section 3: Region Activation
+    for cm in ['6 Distance Bands', '3 Geo Tiers']:
+        tag = '6band' if '6' in cm else '3tier'
+        figures[f'pop_house_{tag}'] = geo.chart_2_1(dff, cm, house_pop_df=house_pop_df)
+        figures[f'act_weekly_{tag}'] = geo.chart_2_2(dff, cm, cumulative=False)
+        figures[f'act_cumul_{tag}'] = geo.chart_2_2(dff, cm, cumulative=True)
 
-            # ── Section 2: Local Impact ──
+    figures['act_by_house'] = geo.chart_activation_by_house(dff)
+
+    # Section 4: Geo Mix by House
+    for cm in ['6 Distance Bands', '3 Geo Tiers']:
+        tag = '6band' if '6' in cm else '3tier'
+        figures[f'geo_mix_{tag}'] = geo.chart_geo_mix_by_house(dff, cm)
+
+    # Section 5: Platform Insights — top platforms
+    dff_cp = dff.dropna(subset=['channel_type', 'platform']).copy()
+    if not dff_cp.empty:
+        dff_cp['channel_platform'] = dff_cp['channel_type'] + ' | ' + dff_cp['platform']
+        default_platforms = [p for p in ['Meta', 'Google', 'Direct', 'Organic']
+                            if p in dff_cp['platform'].unique()]
+        if default_platforms:
+            cp_filtered = dff_cp[dff_cp['platform'].isin(default_platforms)]
+            cp_options = (cp_filtered.groupby('channel_platform')['customer_id']
+                          .nunique().sort_values(ascending=False).index.tolist())
             for cm in ['6 Distance Bands', '3 Geo Tiers']:
                 tag = '6band' if '6' in cm else '3tier'
-                figures[f'comp_pct_{tag}{suffix}'] = geo.chart_1_pct(
-                    dff, cm, df_all=dff_all, df_base=dff_base)
-                for metric in ['customers', 'revenue', 'spc']:
-                    figures[f'comp_{metric}_{tag}{suffix}'] = geo.chart_1_abs(
-                        dff, cm, metric=metric, df_all=dff_all, df_base=dff_base)
-                figures[f'fts_{tag}{suffix}'] = geo.chart_acq_metric(
-                    dff, cm, metric='fts_pct', df_all=dff_all, df_base=dff_base)
-                figures[f'ltv_{tag}{suffix}'] = geo.chart_acq_metric(
-                    dff, cm, metric='ltv', df_all=dff_all, df_base=dff_base)
+                figures[f'platform_{tag}'] = geo.chart_platform_geo_composition(
+                    dff, cm, selected_platforms=cp_options
+                )
 
-            # ── Section 3: Region Activation ──
-            for cm in ['6 Distance Bands', '3 Geo Tiers']:
-                tag = '6band' if '6' in cm else '3tier'
-                figures[f'pop_house_{tag}{suffix}'] = geo.chart_2_1(
-                    dff, cm, house_pop_df=house_pop_df)
-                figures[f'act_weekly_{tag}{suffix}'] = geo.chart_2_2(
-                    dff, cm, cumulative=False)
-                figures[f'act_cumul_{tag}{suffix}'] = geo.chart_2_2(
-                    dff, cm, cumulative=True)
+    # Build city performance table (Top 20) — same logic as geo_dashboard.py line 1220-1240
+    import numpy as np
+    city_table_html = ''
+    city_pop_path = Path(geo.CITY_POP_PATH)
+    if city_pop_path.exists() and 'city' in df.columns and 'customer_id' in df.columns:
+        city_pop = pd.read_csv(city_pop_path)
+        city_cust = df.groupby('city').agg(
+            customers=('customer_id', 'nunique'),
+            revenue=('variant_price_after_discount', 'sum'),
+        ).reset_index()
+        city_tbl = city_pop.merge(city_cust, on='city', how='inner')
+        city_tbl['activation'] = (city_tbl['customers'] / (city_tbl['population'] / 1000)).round(2)
+        city_tbl['rev_per_1k'] = (city_tbl['revenue'] / (city_tbl['population'] / 1000)).round(2)
+        city_tbl = city_tbl.sort_values('population', ascending=False).head(20)
+        city_table_html = city_tbl.to_dict(orient='records')
 
-            figures[f'act_by_house{suffix}'] = geo.chart_activation_by_house(dff)
-
-            # ── Section 4: Geo Mix by House ──
-            for cm in ['6 Distance Bands', '3 Geo Tiers']:
-                tag = '6band' if '6' in cm else '3tier'
-                figures[f'geo_mix_{tag}{suffix}'] = geo.chart_geo_mix_by_house(dff, cm)
-
-            # ── Section 5: Platform Insights ──
-            dff_cp = dff.dropna(subset=['channel_type', 'platform']).copy()
-            if not dff_cp.empty:
-                dff_cp['channel_platform'] = dff_cp['channel_type'] + ' | ' + dff_cp['platform']
-                default_platforms = [p for p in ['Meta', 'Google', 'Direct', 'Organic']
-                                    if p in dff_cp['platform'].unique()]
-                if default_platforms:
-                    cp_filtered = dff_cp[dff_cp['platform'].isin(default_platforms)]
-                    cp_options = (cp_filtered.groupby('channel_platform')['customer_id']
-                                  .nunique().sort_values(ascending=False).index.tolist())
-                    for cm in ['6 Distance Bands', '3 Geo Tiers']:
-                        tag = '6band' if '6' in cm else '3tier'
-                        figures[f'platform_{tag}{suffix}'] = geo.chart_platform_geo_composition(
-                            dff, cm, selected_platforms=cp_options)
-
-            # ── City Performance Table ──
-            city_pop_path = Path(geo.CITY_POP_PATH)
-            if (city_pop_path.exists() and 'city' in dff.columns
-                    and 'customer_id' in dff.columns and not dff.empty):
-                city_pop = pd.read_csv(city_pop_path)
-                city_cust = dff.groupby('city').agg(
-                    customers=('customer_id', 'nunique'),
-                    revenue=('variant_price_after_discount', 'sum'),
-                ).reset_index()
-                city_tbl = city_pop.merge(city_cust, on='city', how='inner')
-                city_tbl['activation'] = (city_tbl['customers'] / (city_tbl['population'] / 1000)).round(2)
-                city_tbl['rev_per_1k'] = (city_tbl['revenue'] / (city_tbl['population'] / 1000)).round(2)
-                city_tbl = city_tbl.sort_values('population', ascending=False).head(20)
-                city_tables[suffix] = city_tbl.to_dict(orient='records')
-
-    return figures, city_tables, meta
+    return figures, city_table_html
 
 
 # =============================================================================
 # 4. Build the HTML page
 # =============================================================================
 
-def _is_mapbox_fig(fig) -> bool:
-    """Check if a Plotly figure contains mapbox traces."""
-    for trace in fig.data:
-        if hasattr(trace, 'type') and 'mapbox' in str(trace.type):
-            return True
-    return False
-
-
 def fig_to_div(fig, div_id: str, hidden: bool = False) -> str:
-    """Convert a Plotly figure to an HTML div (no full page, CDN plotly).
-
-    For mapbox charts, uses visibility:hidden + position:absolute instead of
-    display:none so the GL context can still initialize (mapbox requires a
-    non-zero-dimension container to load tiles).
-    """
+    """Convert a Plotly figure to an HTML div (no full page, CDN plotly)."""
     inner = fig.to_html(full_html=False, include_plotlyjs=False, div_id=div_id)
-    is_map = _is_mapbox_fig(fig)
-
-    if hidden:
-        if is_map:
-            # Keep in the flow at 0 opacity so mapbox GL can init
-            style = 'visibility:hidden;position:absolute;left:-9999px;width:100%;height:600px'
-        else:
-            style = 'display:none'
-    else:
-        style = 'display:block'
-
-    data_attr = ' data-mapbox="1"' if is_map else ''
-    return f'<div id="wrap_{div_id}" style="{style}"{data_attr}>{inner}</div>'
+    display = 'none' if hidden else 'block'
+    return f'<div id="wrap_{div_id}" style="display:{display}">{inner}</div>'
 
 
-def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict = None) -> str:
+def build_html(figures: dict, geo_module, city_table_data=None) -> str:
     """Assemble the full index.html with all chart divs, control panel, and city table."""
     import json as _json
 
@@ -365,9 +302,6 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
     SIDEBAR_BG = geo_module.SIDEBAR_BG
     MUTED = '#6b6ba3'
     as_of = date.today().isoformat()
-
-    meta = meta or {}
-    city_tables = city_tables or {}
 
     def section(title, subtitle=''):
         sub = f'<p style="color:{TEXT};opacity:0.65;margin:3px 0 0;font-size:0.82rem">{subtitle}</p>' if subtitle else ''
@@ -386,116 +320,83 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
                    f'<div style="font-size:0.72rem;color:{MUTED};margin-bottom:8px">{sub}</div>')
         return (f'<div class="chart-panel">{hdr}{content}</div>')
 
-    def get_all(base_key, base_hidden=False):
-        """Generate all filter variants of a chart.
-        base_hidden: if True, even the default filter combo starts hidden.
-        """
-        html = ''
-        for _, ft in FTB_OPTIONS:
-            for _, rn in RENEWAL_OPTIONS:
-                suffix = f'__{ft}__{rn}'
-                full_key = f'{base_key}{suffix}'
-                is_default_filter = (ft == 'all' and rn == 'incl')
-                hidden = not (is_default_filter and not base_hidden)
-                if full_key in figures:
-                    html += fig_to_div(figures[full_key], full_key, hidden=hidden)
-        if not html:
-            return f'<p style="color:{MUTED};font-size:0.8rem">Chart not available (missing cache data)</p>'
-        return html
-
-    # ── Assemble main content sections ──
-    parts = []
-
-    # Helper for single (non-filtered) charts like maps
     def get(key, hidden=False):
         if key in figures:
             return fig_to_div(figures[key], key, hidden=hidden)
         return f'<p style="color:{MUTED};font-size:0.8rem">Chart not available (missing cache data)</p>'
 
-    # Section 1: Geographic Distribution (maps — shared across filter combos)
-    has_maps = any(k.startswith('city_map') or k.startswith('plz_map') for k in figures)
-    if has_maps:
+    # ── Assemble main content sections ──
+    parts = []
+
+    # Section 1: Geographic Distribution (maps)
+    if any(k.startswith('city_map') or k.startswith('plz_map') for k in figures):
         parts.append(section('Geographic Distribution', 'Population density and customer reach by PLZ area'))
         map_left = get('city_map_pop')
-        map_right = ''
-        for m in ['customers', 'rev_per_1k', 'activation']:
-            map_right += get(f'plz_map_{m}', hidden=(m != 'customers'))
+        map_right = ''.join([
+            get('plz_map_customers', hidden=False),
+            get('plz_map_rev_per_1k', hidden=True),
+            get('plz_map_activation', hidden=True),
+        ])
         parts.append(row_2(panel(map_left, 'Population by City'), panel(map_right, 'PLZ Area Map')))
 
-    # City Performance Tables (one per filter combo, toggled by JS)
-    if city_tables:
-        table_parts = []
-        for suffix, rows in city_tables.items():
-            is_default = suffix == '__all__incl'
-            display = 'block' if is_default else 'none'
-            tbl_html = f'''<div data-city-table="{suffix}" style="display:{display}">
-              <div class="chart-panel" style="margin-top:14px">
-              <div style="font-size:0.85rem;font-weight:600;color:{TEXT};margin-bottom:2px">Performance by City (Top 20)</div>
-              <div style="font-size:0.72rem;color:{MUTED};margin-bottom:8px">Sorted by population</div>
-              <div style="overflow-x:auto">
-              <table class="city-table">
-                <thead><tr>
-                  <th>#</th><th>City</th><th>Population</th><th>Customers</th>
-                  <th>Revenue</th><th>Activation</th><th>Rev / 1k Pop</th>
-                </tr></thead>
-                <tbody>''' + ''.join(
-                f'<tr><td>{i+1}</td><td>{r["city"]}</td>'
-                f'<td>{r["population"]:,.0f}</td><td>{r["customers"]:,.0f}</td>'
-                f'<td>&euro;{r["revenue"]:,.0f}</td><td>{r["activation"]:.2f}</td>'
-                f'<td>&euro;{r["rev_per_1k"]:,.2f}</td></tr>'
-                for i, r in enumerate(rows)
-            ) + '''</tbody></table></div></div></div>'''
-            table_parts.append(tbl_html)
-        parts.append('\n'.join(table_parts))
+    # City Performance Table (Top 20)
+    if city_table_data:
+        parts.append(f'''<div class="chart-panel" style="margin-top:14px">
+          <div style="font-size:0.85rem;font-weight:600;color:{TEXT};margin-bottom:2px">Performance by City (Top 20)</div>
+          <div style="font-size:0.72rem;color:{MUTED};margin-bottom:8px">Sorted by population</div>
+          <div style="overflow-x:auto">
+          <table class="city-table">
+            <thead><tr>
+              <th>#</th><th>City</th><th>Population</th><th>Customers</th>
+              <th>Revenue</th><th>Activation</th><th>Rev / 1k Pop</th>
+            </tr></thead>
+            <tbody>''' + ''.join(
+            f'<tr><td>{i+1}</td><td>{r["city"]}</td>'
+            f'<td>{r["population"]:,.0f}</td><td>{r["customers"]:,.0f}</td>'
+            f'<td>&euro;{r["revenue"]:,.0f}</td><td>{r["activation"]:.2f}</td>'
+            f'<td>&euro;{r["rev_per_1k"]:,.2f}</td></tr>'
+            for i, r in enumerate(city_table_data)
+        ) + '''</tbody></table></div></div>''')
 
     # Section 2: Local Impact
     parts.append(section('Local Impact', 'Geo composition, FTS% and LTV by distance over time'))
 
-    pct_html = get_all('comp_pct_6band') + get_all('comp_pct_3tier', base_hidden=True)
+    pct_html = get('comp_pct_6band') + get('comp_pct_3tier', hidden=True)
     vol_html = ''
     for metric in ['customers', 'revenue', 'spc']:
         for tag in ['6band', '3tier']:
             hidden = not (metric == 'customers' and tag == '6band')
-            vol_html += get_all(f'comp_{metric}_{tag}', base_hidden=hidden)
+            vol_html += get(f'comp_{metric}_{tag}', hidden=hidden)
     parts.append(row_2(panel(pct_html), panel(vol_html)))
 
-    fts_html = get_all('fts_6band') + get_all('fts_3tier', base_hidden=True)
-    ltv_html = get_all('ltv_6band') + get_all('ltv_3tier', base_hidden=True)
+    fts_html = get('fts_6band') + get('fts_3tier', hidden=True)
+    ltv_html = get('ltv_6band') + get('ltv_3tier', hidden=True)
     parts.append(row_2(panel(fts_html), panel(ltv_html)))
 
     # Section 3: Region Activation
     parts.append(section('Region Activation', 'Population catchment and activation rate per house'))
 
-    pop_html = get_all('pop_house_6band') + get_all('pop_house_3tier', base_hidden=True)
+    pop_html = get('pop_house_6band') + get('pop_house_3tier', hidden=True)
     act_html = ''
     for mode in ['weekly', 'cumul']:
         for tag in ['6band', '3tier']:
             hidden = not (mode == 'weekly' and tag == '6band')
-            act_html += get_all(f'act_{mode}_{tag}', base_hidden=hidden)
+            act_html += get(f'act_{mode}_{tag}', hidden=hidden)
     parts.append(row_2(panel(pop_html), panel(act_html)))
-    parts.append(panel(get_all('act_by_house')))
+    parts.append(panel(get('act_by_house')))
 
     # Section 4: Geo Mix by House
     parts.append(section('Geo Mix by House', 'Distance-band composition evolves as each house matures'))
-    mix_html = get_all('geo_mix_6band') + get_all('geo_mix_3tier', base_hidden=True)
+    mix_html = get('geo_mix_6band') + get('geo_mix_3tier', hidden=True)
     parts.append(panel(mix_html))
 
     # Section 5: Platform Insights
     if any(k.startswith('platform_') for k in figures):
         parts.append(section('Platform Insights', 'Geo composition per acquisition channel'))
-        plat_html = get_all('platform_6band') + get_all('platform_3tier', base_hidden=True)
+        plat_html = get('platform_6band') + get('platform_3tier', hidden=True)
         parts.append(panel(plat_html))
 
     body = '\n'.join(parts)
-
-    # ── Sidebar info items ──
-    houses_list = meta.get('houses', [])
-    events_list = meta.get('event_cats', [])
-    date_min = meta.get('date_min', '—')
-    date_max = meta.get('date_max', '—')
-
-    houses_info = ', '.join(houses_list) if houses_list else '—'
-    events_info = ', '.join(events_list) if events_list else '—'
 
     return f'''<!DOCTYPE html>
 <html lang="en">
@@ -515,7 +416,7 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
     .layout {{ display: flex; min-height: 100vh; }}
 
     .sidebar {{
-      width: 280px; min-width: 280px; background: {SIDEBAR_BG};
+      width: 260px; min-width: 260px; background: {SIDEBAR_BG};
       padding: 20px 16px; position: sticky; top: 0; height: 100vh;
       overflow-y: auto; border-right: 1px solid {BORDER};
     }}
@@ -545,17 +446,6 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
     }}
     .toggle-btn.active {{ background: {TEXT}; color: #fff; border-color: {TEXT}; }}
     .toggle-btn:hover:not(.active) {{ background: {TILE_BG}; }}
-
-    .info-group {{ margin-bottom: 14px; }}
-    .info-label {{
-      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em;
-      color: {MUTED}; margin-bottom: 4px; font-weight: 600;
-    }}
-    .info-value {{
-      font-size: 0.74rem; color: {TEXT}; background: #fff;
-      border: 1px solid {BORDER}; border-radius: 6px;
-      padding: 5px 10px; line-height: 1.4; opacity: 0.85;
-    }}
 
     .main {{ flex: 1; min-width: 0; padding: 24px 20px 48px; }}
 
@@ -610,30 +500,6 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
       <hr>
 
       <div class="ctrl-group">
-        <div class="ctrl-label">Customer Type</div>
-        <div class="ctrl-btns">
-          <button class="toggle-btn active" data-group="customer_type" data-value="all"
-                  onclick="toggle('customer_type','all')">All</button>
-          <button class="toggle-btn" data-group="customer_type" data-value="ftb"
-                  onclick="toggle('customer_type','ftb')">FTB</button>
-          <button class="toggle-btn" data-group="customer_type" data-value="rb"
-                  onclick="toggle('customer_type','rb')">RB</button>
-        </div>
-      </div>
-
-      <div class="ctrl-group">
-        <div class="ctrl-label">Renewals</div>
-        <div class="ctrl-btns">
-          <button class="toggle-btn active" data-group="renewals" data-value="incl"
-                  onclick="toggle('renewals','incl')">Include</button>
-          <button class="toggle-btn" data-group="renewals" data-value="excl"
-                  onclick="toggle('renewals','excl')">Exclude</button>
-        </div>
-      </div>
-
-      <hr>
-
-      <div class="ctrl-group">
         <div class="ctrl-label">Distance Grouping</div>
         <div class="ctrl-btns">
           <button class="toggle-btn active" data-group="color_mode" data-value="6band"
@@ -678,27 +544,9 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
       </div>
 
       <hr>
-
-      <div class="info-group">
-        <div class="info-label">Houses</div>
-        <div class="info-value">{houses_info}</div>
-      </div>
-
-      <div class="info-group">
-        <div class="info-label">Event Category</div>
-        <div class="info-value">All ({', '.join(events_list[:3])}{'...' if len(events_list) > 3 else ''})</div>
-      </div>
-
-      <div class="info-group">
-        <div class="info-label">Date Range</div>
-        <div class="info-value">{date_min} — {date_max}</div>
-      </div>
-
-      <hr>
       <div style="font-size:0.68rem;color:{MUTED};line-height:1.4">
         Static snapshot of <code style="font-size:0.66rem">geo_dashboard.py</code>.<br>
-        Charts are pre-rendered for each Customer Type &amp; Renewals combo.<br>
-        House, Event &amp; Date filters show snapshot defaults.
+        Charts are pre-rendered — toggles switch between variants.
       </div>
     </div>
 
@@ -715,8 +563,6 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
       vol_metric: 'customers',
       act_mode: 'weekly',
       map_metric: 'customers',
-      customer_type: 'all',
-      renewals: 'incl',
     }};
 
     function toggle(group, value) {{
@@ -732,115 +578,55 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
       const vm = activeState.vol_metric;
       const am = activeState.act_mode;
       const mm = activeState.map_metric;
-      const ct = activeState.customer_type;
-      const rn = activeState.renewals;
-      const filterSuffix = `__${{ct}}__${{rn}}`;
 
-      // Helpers for show/hide that respect mapbox divs
-      function showDiv(el) {{
-        if (el.dataset.mapbox) {{
-          el.style.visibility = 'visible';
-          el.style.position = 'relative';
-          el.style.left = '0';
-          el.style.height = '';
-        }} else {{
-          el.style.display = 'block';
-        }}
-      }}
-      function hideDiv(el) {{
-        if (el.dataset.mapbox) {{
-          el.style.visibility = 'hidden';
-          el.style.position = 'absolute';
-          el.style.left = '-9999px';
-          el.style.height = '600px';
-        }} else {{
-          el.style.display = 'none';
-        }}
-      }}
-      function isVisible(el) {{
-        if (el.dataset.mapbox) return el.style.visibility !== 'hidden';
-        return el.style.display !== 'none';
-      }}
-
-      // Toggle chart divs
       document.querySelectorAll('[id^="wrap_"]').forEach(el => {{
         const id = el.id.replace('wrap_', '');
 
-        // ── Maps: no filter suffix, only toggled by map_metric ──
-        if (id === 'city_map_pop') {{
-          showDiv(el);
-          return;
-        }}
+        // Map charts
         if (id.startsWith('plz_map_')) {{
-          (id.replace('plz_map_', '') === mm) ? showDiv(el) : hideDiv(el);
+          el.style.display = (id.replace('plz_map_', '') === mm) ? 'block' : 'none';
           return;
         }}
-
-        // ── All other charts have filter suffix __<ftb>__<ren> ──
-        if (!id.includes('__')) {{
-          // Unknown chart without suffix — leave visible
-          return;
-        }}
-
-        // Check filter match
-        if (!id.endsWith(filterSuffix)) {{
-          hideDiv(el);
-          return;
-        }}
-
-        // Strip filter suffix to get the base chart key
-        const base = id.slice(0, id.length - filterSuffix.length);
 
         // Charts depending on color_mode only
         const cmOnly = ['comp_pct_', 'fts_', 'ltv_', 'pop_house_', 'geo_mix_', 'platform_'];
         for (const prefix of cmOnly) {{
-          if (base.startsWith(prefix)) {{
-            (base.slice(prefix.length) === cm) ? showDiv(el) : hideDiv(el);
+          if (id.startsWith(prefix)) {{
+            el.style.display = (id.slice(prefix.length) === cm) ? 'block' : 'none';
             return;
           }}
         }}
 
         // Volume charts: vol_metric + color_mode
-        if (base.startsWith('comp_') && !base.startsWith('comp_pct_')) {{
-          const rest = base.replace('comp_', '');
+        if (id.startsWith('comp_') && !id.startsWith('comp_pct_')) {{
+          const rest = id.replace('comp_', '');
           const parts = rest.split('_');
-          (parts[0] === vm && parts[1] === cm) ? showDiv(el) : hideDiv(el);
+          el.style.display = (parts[0] === vm && parts[1] === cm) ? 'block' : 'none';
           return;
         }}
 
         // Activation charts: act_mode + color_mode
-        if (base.startsWith('act_weekly_') || base.startsWith('act_cumul_')) {{
-          const parts = base.split('_');
-          (parts[1] === am && parts[2] === cm) ? showDiv(el) : hideDiv(el);
+        if (id.startsWith('act_weekly_') || id.startsWith('act_cumul_')) {{
+          const parts = id.split('_');
+          el.style.display = (parts[1] === am && parts[2] === cm) ? 'block' : 'none';
           return;
         }}
 
-        // Always visible (within active filter group)
-        if (base === 'act_by_house') {{
-          showDiv(el);
+        // Always visible
+        if (id === 'act_by_house' || id === 'city_map_pop') {{
+          el.style.display = 'block';
         }}
       }});
 
-      // Toggle city tables
-      document.querySelectorAll('[data-city-table]').forEach(el => {{
-        el.style.display = (el.dataset.cityTable === filterSuffix) ? 'block' : 'none';
-      }});
-
-      // Resize and relayout newly visible Plotly charts (especially maps)
+      // Resize newly visible Plotly charts
       setTimeout(() => {{
         document.querySelectorAll('[id^="wrap_"]').forEach(el => {{
-          if (isVisible(el)) {{
+          if (el.style.display !== 'none') {{
             const p = el.querySelector('.js-plotly-plot');
-            if (p) {{
-              Plotly.Plots.resize(p);
-              // Force mapbox tile reload
-              if (el.dataset.mapbox) {{
-                Plotly.relayout(p, {{}});
-              }}
-            }}
+            if (p) Plotly.Plots.resize(p);
           }}
         }});
-      }}, 150);
+      }}, 50);
     }}
 
     window.addEventListener('load', applyVisibility);
@@ -850,7 +636,7 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
 
 
 # =============================================================================
-# 5. CLI
+# 4. CLI
 # =============================================================================
 
 def main():
@@ -878,12 +664,14 @@ def main():
     print(f"Importing chart functions from: {dashboard_path}")
     geo = _import_dashboard(dashboard_path)
 
-    print("Generating figures for all filter combinations...")
-    figures, city_tables, meta = generate_figures(geo, refresh=args.fresh, dashboard_dir=dashboard_path.parent)
-    print(f"  Total: {len(figures)} chart(s), {len(city_tables)} city table(s)")
+    print("Generating figures (this may take a moment)...")
+    figures, city_table_data = generate_figures(geo, refresh=args.fresh, dashboard_dir=dashboard_path.parent)
+    print(f"  Generated {len(figures)} chart(s)")
+    if city_table_data:
+        print(f"  City table: {len(city_table_data)} rows")
 
     print("Building HTML...")
-    html = build_html(figures, geo, city_tables=city_tables, meta=meta)
+    html = build_html(figures, geo, city_table_data=city_table_data)
 
     out_path = Path(args.out) if args.out else here / 'index.html'
     out_path.write_text(html, encoding='utf-8')
