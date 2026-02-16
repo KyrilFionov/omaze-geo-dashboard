@@ -230,11 +230,29 @@ def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = No
                     dff, cm, selected_platforms=cp_options
                 )
 
-    return figures
+    # Build city performance table (Top 20)
+    import numpy as np
+    city_table_html = ''
+    if 'city' in df.columns and 'customer_id' in df.columns:
+        seeds_dir = _find_seeds_dir(dashboard_dir) if dashboard_dir else None
+        if seeds_dir and (seeds_dir / 'dim_plz_population.csv').exists():
+            pop_csv = pd.read_csv(seeds_dir / 'dim_plz_population.csv', dtype={'plz_gebiet': str})
+            city_pop = pop_csv.groupby('ort').agg(population=('einwohner', 'sum')).reset_index().rename(columns={'ort': 'city'})
+            city_cust = df.groupby('city').agg(
+                customers=('customer_id', 'nunique'),
+                revenue=('variant_price_after_discount', 'sum'),
+            ).reset_index()
+            city_tbl = city_pop.merge(city_cust, on='city', how='inner')
+            city_tbl['activation'] = (city_tbl['customers'] / (city_tbl['population'] / 1000)).round(2)
+            city_tbl['rev_per_1k'] = (city_tbl['revenue'] / (city_tbl['population'] / 1000)).round(2)
+            city_tbl = city_tbl.sort_values('population', ascending=False).head(20)
+            city_table_html = city_tbl.to_dict(orient='records')
+
+    return figures, city_table_html
 
 
 # =============================================================================
-# 3. Build the HTML page
+# 4. Build the HTML page
 # =============================================================================
 
 def fig_to_div(fig, div_id: str, hidden: bool = False) -> str:
@@ -244,13 +262,15 @@ def fig_to_div(fig, div_id: str, hidden: bool = False) -> str:
     return f'<div id="wrap_{div_id}" style="display:{display}">{inner}</div>'
 
 
-def build_html(figures: dict, geo_module) -> str:
-    """Assemble the full index.html with all chart divs and JS toggles."""
+def build_html(figures: dict, geo_module, city_table_data=None) -> str:
+    """Assemble the full index.html with all chart divs, control panel, and city table."""
+    import json as _json
 
     BG = geo_module.BG_COLOR
     TEXT = geo_module.TEXT_COLOR
     TILE_BG = geo_module.SECTION_TILE_BG
     BORDER = geo_module.GRID_COLOR
+    SIDEBAR_BG = geo_module.SIDEBAR_BG
     MUTED = '#6b6ba3'
     as_of = date.today().isoformat()
 
@@ -262,56 +282,26 @@ def build_html(figures: dict, geo_module) -> str:
 
     def row_2(*divs):
         cols = ''.join(f'<div style="flex:1;min-width:0">{d}</div>' for d in divs)
-        return f'<div style="display:flex;gap:14px;flex-wrap:wrap">{cols}</div>'
+        return f'<div class="chart-row">{cols}</div>'
 
     def panel(content, title='', sub=''):
         hdr = ''
         if title:
             hdr = (f'<div style="font-size:0.85rem;font-weight:600;color:{TEXT};margin-bottom:2px">{title}</div>'
                    f'<div style="font-size:0.72rem;color:{MUTED};margin-bottom:8px">{sub}</div>')
-        return (f'<div style="background:#fff;border-radius:12px;border:1px solid {BORDER};'
-                f'padding:14px 16px;box-shadow:0 2px 8px rgba(56,57,119,0.06)">{hdr}{content}</div>')
+        return (f'<div class="chart-panel">{hdr}{content}</div>')
 
     def get(key, hidden=False):
         if key in figures:
             return fig_to_div(figures[key], key, hidden=hidden)
         return f'<p style="color:{MUTED};font-size:0.8rem">Chart not available (missing cache data)</p>'
 
-    # Toggle buttons builder
-    def toggle_bar(group_name, options):
-        btns = []
-        for i, (label, value) in enumerate(options):
-            cls = 'active' if i == 0 else ''
-            btns.append(f'<button class="toggle-btn {cls}" data-group="{group_name}" '
-                        f'data-value="{value}" onclick="toggle(\'{group_name}\',\'{value}\')">{label}</button>')
-        return f'<div class="toggle-bar">{"".join(btns)}</div>'
-
-    # ── Assemble sections ──
-
+    # ── Assemble main content sections ──
     parts = []
-
-    # Header
-    parts.append(f'''
-    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px;
-         padding-bottom:14px;border-bottom:2px solid {BORDER}">
-      <div>
-        <div style="font-size:1.6rem;font-weight:700;color:{TEXT}">Geo Insights</div>
-        <div style="font-size:0.85rem;color:{MUTED};margin-top:4px">
-          Geographic performance across houses, distance bands &amp; channels
-        </div>
-      </div>
-      <div style="font-size:0.75rem;color:{MUTED};white-space:nowrap">
-        Snapshot exported {as_of}
-      </div>
-    </div>''')
 
     # Section 1: Geographic Distribution (maps)
     if any(k.startswith('city_map') or k.startswith('plz_map') for k in figures):
         parts.append(section('Geographic Distribution', 'Population density and customer reach by PLZ area'))
-        # Map metric toggle
-        parts.append(toggle_bar('map_metric', [
-            ('Customers', 'customers'), ('Rev / 1k Pop', 'rev_per_1k'), ('Activation', 'activation')
-        ]))
         map_left = get('city_map_pop')
         map_right = ''.join([
             get('plz_map_customers', hidden=False),
@@ -320,12 +310,28 @@ def build_html(figures: dict, geo_module) -> str:
         ])
         parts.append(row_2(panel(map_left, 'Population by City'), panel(map_right, 'PLZ Area Map')))
 
+    # City Performance Table (Top 20)
+    if city_table_data:
+        parts.append(f'''<div class="chart-panel" style="margin-top:14px">
+          <div style="font-size:0.85rem;font-weight:600;color:{TEXT};margin-bottom:2px">Performance by City (Top 20)</div>
+          <div style="font-size:0.72rem;color:{MUTED};margin-bottom:8px">Sorted by population</div>
+          <div style="overflow-x:auto">
+          <table class="city-table">
+            <thead><tr>
+              <th>#</th><th>City</th><th>Population</th><th>Customers</th>
+              <th>Revenue</th><th>Activation</th><th>Rev / 1k Pop</th>
+            </tr></thead>
+            <tbody>''' + ''.join(
+            f'<tr><td>{i+1}</td><td>{r["city"]}</td>'
+            f'<td>{r["population"]:,.0f}</td><td>{r["customers"]:,.0f}</td>'
+            f'<td>&euro;{r["revenue"]:,.0f}</td><td>{r["activation"]:.2f}</td>'
+            f'<td>&euro;{r["rev_per_1k"]:,.2f}</td></tr>'
+            for i, r in enumerate(city_table_data)
+        ) + '''</tbody></table></div></div>''')
+
     # Section 2: Local Impact
     parts.append(section('Local Impact', 'Geo composition, FTS% and LTV by distance over time'))
-    parts.append(toggle_bar('color_mode', [('6 Distance Bands', '6band'), ('3 Geo Tiers', '3tier')]))
-    parts.append(toggle_bar('vol_metric', [('Customers', 'customers'), ('Revenue', 'revenue'), ('SpC', 'spc')]))
 
-    # Row 1: Composition % + Volume metric
     pct_html = get('comp_pct_6band') + get('comp_pct_3tier', hidden=True)
     vol_html = ''
     for metric in ['customers', 'revenue', 'spc']:
@@ -334,14 +340,12 @@ def build_html(figures: dict, geo_module) -> str:
             vol_html += get(f'comp_{metric}_{tag}', hidden=hidden)
     parts.append(row_2(panel(pct_html), panel(vol_html)))
 
-    # Row 2: FTS% + LTV
     fts_html = get('fts_6band') + get('fts_3tier', hidden=True)
     ltv_html = get('ltv_6band') + get('ltv_3tier', hidden=True)
     parts.append(row_2(panel(fts_html), panel(ltv_html)))
 
     # Section 3: Region Activation
     parts.append(section('Region Activation', 'Population catchment and activation rate per house'))
-    parts.append(toggle_bar('act_mode', [('Weekly', 'weekly'), ('Cumulative', 'cumul')]))
 
     pop_html = get('pop_house_6band') + get('pop_house_3tier', hidden=True)
     act_html = ''
@@ -378,52 +382,153 @@ def build_html(figures: dict, geo_module) -> str:
       margin: 0; font-family: system-ui, -apple-system, sans-serif;
       background: {BG}; color: {TEXT};
     }}
-    .page {{ max-width: 1300px; margin: 0 auto; padding: 24px 16px 48px; }}
-    .toggle-bar {{ display: flex; gap: 6px; margin-bottom: 12px; }}
+
+    /* ── Layout: sidebar + main ── */
+    .layout {{ display: flex; min-height: 100vh; }}
+
+    .sidebar {{
+      width: 260px; min-width: 260px; background: {SIDEBAR_BG};
+      padding: 20px 16px; position: sticky; top: 0; height: 100vh;
+      overflow-y: auto; border-right: 1px solid {BORDER};
+    }}
+    .sidebar h1 {{
+      font-size: 1.3rem; font-weight: 700; color: {TEXT}; margin: 0 0 4px;
+    }}
+    .sidebar .subtitle {{
+      font-size: 0.78rem; color: {MUTED}; margin: 0 0 18px; line-height: 1.4;
+    }}
+    .sidebar .as-of {{
+      font-size: 0.7rem; color: {MUTED}; margin-bottom: 20px;
+    }}
+    .sidebar hr {{
+      border: none; border-top: 1px solid {BORDER}; margin: 14px 0;
+    }}
+
+    .ctrl-group {{ margin-bottom: 16px; }}
+    .ctrl-label {{
+      font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em;
+      color: {MUTED}; margin-bottom: 6px; font-weight: 600;
+    }}
+    .ctrl-btns {{ display: flex; flex-wrap: wrap; gap: 4px; }}
     .toggle-btn {{
-      padding: 6px 14px; border-radius: 6px; border: 1px solid {BORDER};
-      background: #fff; color: {TEXT}; font-size: 0.78rem; cursor: pointer;
-      transition: all 0.15s;
+      padding: 5px 11px; border-radius: 6px; border: 1px solid {BORDER};
+      background: #fff; color: {TEXT}; font-size: 0.74rem; cursor: pointer;
+      transition: all 0.15s; white-space: nowrap;
     }}
     .toggle-btn.active {{ background: {TEXT}; color: #fff; border-color: {TEXT}; }}
     .toggle-btn:hover:not(.active) {{ background: {TILE_BG}; }}
+
+    .main {{ flex: 1; min-width: 0; padding: 24px 20px 48px; }}
+
+    .chart-row {{ display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }}
+    .chart-row > div {{ flex: 1; min-width: 0; }}
+    .chart-panel {{
+      background: #fff; border-radius: 12px; border: 1px solid {BORDER};
+      padding: 14px 16px; box-shadow: 0 2px 8px rgba(56,57,119,0.06);
+      margin-bottom: 14px;
+    }}
+
     .js-plotly-plot {{ width: 100% !important; }}
-    @media (max-width: 900px) {{
-      div[style*="display:flex"] {{ flex-direction: column !important; }}
+
+    /* City table */
+    .city-table {{ width: 100%; border-collapse: collapse; font-size: 0.78rem; }}
+    .city-table th, .city-table td {{
+      padding: 6px 8px; border-bottom: 1px solid {BORDER}; text-align: left;
+    }}
+    .city-table th {{
+      font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em;
+      color: {MUTED}; font-weight: 600;
+    }}
+    .city-table tr:last-child td {{ border-bottom: none; }}
+    .city-table td:nth-child(n+3) {{ text-align: right; }}
+    .city-table th:nth-child(n+3) {{ text-align: right; }}
+
+    /* Sidebar toggle (mobile) */
+    .sidebar-toggle {{
+      display: none; position: fixed; top: 12px; left: 12px; z-index: 1000;
+      background: {TEXT}; color: #fff; border: none; border-radius: 8px;
+      padding: 8px 12px; font-size: 0.8rem; cursor: pointer;
+    }}
+
+    @media (max-width: 1000px) {{
+      .sidebar {{ display: none; position: fixed; z-index: 999; left: 0; top: 0; }}
+      .sidebar.open {{ display: block; }}
+      .sidebar-toggle {{ display: block; }}
+      .chart-row {{ flex-direction: column; }}
     }}
   </style>
 </head>
 <body>
-  <div class="page">
-    {body}
+  <button class="sidebar-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">
+    Controls
+  </button>
+  <div class="layout">
+    <!-- ── Control Panel (Sidebar) ── -->
+    <div class="sidebar">
+      <h1>Geo Insights</h1>
+      <div class="subtitle">Geographic performance across houses, distance bands &amp; channels</div>
+      <div class="as-of">Snapshot exported {as_of}</div>
+      <hr>
+
+      <div class="ctrl-group">
+        <div class="ctrl-label">Distance Grouping</div>
+        <div class="ctrl-btns">
+          <button class="toggle-btn active" data-group="color_mode" data-value="6band"
+                  onclick="toggle('color_mode','6band')">6 Distance Bands</button>
+          <button class="toggle-btn" data-group="color_mode" data-value="3tier"
+                  onclick="toggle('color_mode','3tier')">3 Geo Tiers</button>
+        </div>
+      </div>
+
+      <div class="ctrl-group">
+        <div class="ctrl-label">Volume Metric</div>
+        <div class="ctrl-btns">
+          <button class="toggle-btn active" data-group="vol_metric" data-value="customers"
+                  onclick="toggle('vol_metric','customers')">Customers</button>
+          <button class="toggle-btn" data-group="vol_metric" data-value="revenue"
+                  onclick="toggle('vol_metric','revenue')">Revenue</button>
+          <button class="toggle-btn" data-group="vol_metric" data-value="spc"
+                  onclick="toggle('vol_metric','spc')">SpC</button>
+        </div>
+      </div>
+
+      <div class="ctrl-group">
+        <div class="ctrl-label">Activation Mode</div>
+        <div class="ctrl-btns">
+          <button class="toggle-btn active" data-group="act_mode" data-value="weekly"
+                  onclick="toggle('act_mode','weekly')">Weekly</button>
+          <button class="toggle-btn" data-group="act_mode" data-value="cumul"
+                  onclick="toggle('act_mode','cumul')">Cumulative</button>
+        </div>
+      </div>
+
+      <div class="ctrl-group">
+        <div class="ctrl-label">Map Metric</div>
+        <div class="ctrl-btns">
+          <button class="toggle-btn active" data-group="map_metric" data-value="customers"
+                  onclick="toggle('map_metric','customers')">Customers</button>
+          <button class="toggle-btn" data-group="map_metric" data-value="rev_per_1k"
+                  onclick="toggle('map_metric','rev_per_1k')">Rev / 1k Pop</button>
+          <button class="toggle-btn" data-group="map_metric" data-value="activation"
+                  onclick="toggle('map_metric','activation')">Activation</button>
+        </div>
+      </div>
+
+      <hr>
+      <div style="font-size:0.68rem;color:{MUTED};line-height:1.4">
+        Static snapshot of <code style="font-size:0.66rem">geo_dashboard.py</code>.<br>
+        Charts are pre-rendered — toggles switch between variants.
+      </div>
+    </div>
+
+    <!-- ── Main Content ── -->
+    <div class="main">
+      {body}
+    </div>
   </div>
+
   <script>
     // ── Toggle logic (inline JS per DEVS guidance) ──
-    // Each toggle group controls which chart divs are visible.
-
-    const TOGGLE_RULES = {{
-      // group -> which div ID prefixes to show/hide
-      color_mode: {{
-        '6band': {{show: ['6band'], hide: ['3tier']}},
-        '3tier': {{show: ['3tier'], hide: ['6band']}},
-      }},
-      vol_metric: {{
-        'customers': {{show: ['comp_customers'], hide: ['comp_revenue', 'comp_spc']}},
-        'revenue':   {{show: ['comp_revenue'],   hide: ['comp_customers', 'comp_spc']}},
-        'spc':       {{show: ['comp_spc'],       hide: ['comp_customers', 'comp_revenue']}},
-      }},
-      act_mode: {{
-        'weekly': {{show: ['act_weekly'], hide: ['act_cumul']}},
-        'cumul':  {{show: ['act_cumul'],  hide: ['act_weekly']}},
-      }},
-      map_metric: {{
-        'customers':  {{show: ['plz_map_customers'],  hide: ['plz_map_rev_per_1k', 'plz_map_activation']}},
-        'rev_per_1k': {{show: ['plz_map_rev_per_1k'], hide: ['plz_map_customers', 'plz_map_activation']}},
-        'activation': {{show: ['plz_map_activation'],  hide: ['plz_map_customers', 'plz_map_rev_per_1k']}},
-      }},
-    }};
-
-    // Track active state
     const activeState = {{
       color_mode: '6band',
       vol_metric: 'customers',
@@ -433,93 +538,68 @@ def build_html(figures: dict, geo_module) -> str:
 
     function toggle(group, value) {{
       activeState[group] = value;
-
-      // Update button styles
       document.querySelectorAll(`.toggle-btn[data-group="${{group}}"]`).forEach(btn => {{
         btn.classList.toggle('active', btn.dataset.value === value);
       }});
-
-      // Apply visibility rules
       applyVisibility();
     }}
 
     function applyVisibility() {{
-      // For color_mode + vol_metric, the compound key determines visibility
-      // e.g. comp_customers_6band is visible when vol_metric=customers AND color_mode=6band
+      const cm = activeState.color_mode;
+      const vm = activeState.vol_metric;
+      const am = activeState.act_mode;
+      const mm = activeState.map_metric;
 
-      const cm = activeState.color_mode;   // '6band' or '3tier'
-      const vm = activeState.vol_metric;   // 'customers', 'revenue', 'spc'
-      const am = activeState.act_mode;     // 'weekly' or 'cumul'
-      const mm = activeState.map_metric;   // 'customers', 'rev_per_1k', 'activation'
-
-      // Iterate all wrap_ divs and decide visibility
       document.querySelectorAll('[id^="wrap_"]').forEach(el => {{
         const id = el.id.replace('wrap_', '');
 
         // Map charts
         if (id.startsWith('plz_map_')) {{
-          const metric = id.replace('plz_map_', '');
-          el.style.display = (metric === mm) ? 'block' : 'none';
+          el.style.display = (id.replace('plz_map_', '') === mm) ? 'block' : 'none';
           return;
         }}
 
-        // Charts that depend on color_mode only
+        // Charts depending on color_mode only
         const cmOnly = ['comp_pct_', 'fts_', 'ltv_', 'pop_house_', 'geo_mix_', 'platform_'];
         for (const prefix of cmOnly) {{
           if (id.startsWith(prefix)) {{
-            const tag = id.slice(prefix.length);
-            el.style.display = (tag === cm) ? 'block' : 'none';
+            el.style.display = (id.slice(prefix.length) === cm) ? 'block' : 'none';
             return;
           }}
         }}
 
-        // Volume charts: depend on both vol_metric AND color_mode
-        if (id.startsWith('comp_')) {{
-          // e.g. comp_customers_6band
+        // Volume charts: vol_metric + color_mode
+        if (id.startsWith('comp_') && !id.startsWith('comp_pct_')) {{
           const rest = id.replace('comp_', '');
-          // But NOT comp_pct_ (handled above)
-          if (rest.startsWith('pct_')) return;
           const parts = rest.split('_');
-          const metric = parts[0];
-          const tag = parts[1];
-          el.style.display = (metric === vm && tag === cm) ? 'block' : 'none';
+          el.style.display = (parts[0] === vm && parts[1] === cm) ? 'block' : 'none';
           return;
         }}
 
-        // Activation charts: depend on act_mode AND color_mode
+        // Activation charts: act_mode + color_mode
         if (id.startsWith('act_weekly_') || id.startsWith('act_cumul_')) {{
           const parts = id.split('_');
-          const mode = parts[1];   // 'weekly' or 'cumul'
-          const tag = parts[2];    // '6band' or '3tier'
-          el.style.display = (mode === am && tag === cm) ? 'block' : 'none';
+          el.style.display = (parts[1] === am && parts[2] === cm) ? 'block' : 'none';
           return;
         }}
 
-        // act_by_house — always visible
-        if (id === 'act_by_house') {{
+        // Always visible
+        if (id === 'act_by_house' || id === 'city_map_pop') {{
           el.style.display = 'block';
-          return;
-        }}
-
-        // city_map_pop — always visible
-        if (id === 'city_map_pop') {{
-          el.style.display = 'block';
-          return;
         }}
       }});
 
-      // Trigger Plotly relayout on now-visible charts (fixes sizing)
+      // Resize newly visible Plotly charts
       setTimeout(() => {{
         document.querySelectorAll('[id^="wrap_"]').forEach(el => {{
           if (el.style.display !== 'none') {{
-            const plotDiv = el.querySelector('.js-plotly-plot');
-            if (plotDiv) Plotly.Plots.resize(plotDiv);
+            const p = el.querySelector('.js-plotly-plot');
+            if (p) Plotly.Plots.resize(p);
           }}
         }});
       }}, 50);
     }}
 
-    // Initial visibility pass
     window.addEventListener('load', applyVisibility);
   </script>
 </body>
@@ -556,11 +636,13 @@ def main():
     geo = _import_dashboard(dashboard_path)
 
     print("Generating figures (this may take a moment)...")
-    figures = generate_figures(geo, refresh=args.fresh, dashboard_dir=dashboard_path.parent)
+    figures, city_table_data = generate_figures(geo, refresh=args.fresh, dashboard_dir=dashboard_path.parent)
     print(f"  Generated {len(figures)} chart(s)")
+    if city_table_data:
+        print(f"  City table: {len(city_table_data)} rows")
 
     print("Building HTML...")
-    html = build_html(figures, geo)
+    html = build_html(figures, geo, city_table_data=city_table_data)
 
     out_path = Path(args.out) if args.out else here / 'index.html'
     out_path.write_text(html, encoding='utf-8')
