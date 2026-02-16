@@ -1,266 +1,36 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Geo Insights — Snapshot</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <meta charset="UTF-8"/>
+  <title>Geo Insights — Awaiting Export</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <style>
-    :root {
-      --bg: #f0f2fc; --card: #ffffff; --border: #dfe1f0;
-      --text: #383977; --muted: #6b6ba3; --accent: #836DFF;
-      --navy: #383977; --teal: #5CB8B2; --gold: #E6A832;
-      --red: #D4544A; --grey: #B8B8B8; --orange: #FF6B00;
-    }
-    * { box-sizing: border-box; }
     body {
-      margin: 0; font-family: system-ui, -apple-system, sans-serif;
-      background: var(--bg); color: var(--text);
+      margin: 0; font-family: system-ui, sans-serif;
+      background: #f0f2fc; color: #383977;
+      display: flex; justify-content: center; align-items: center;
+      min-height: 100vh;
     }
-    .page { max-width: 1200px; margin: 0 auto; padding: 24px 16px 48px; }
-    .header {
-      display: flex; justify-content: space-between; align-items: flex-start;
-      gap: 16px; padding-bottom: 14px; border-bottom: 2px solid var(--border);
+    .card {
+      background: #fff; border-radius: 12px; border: 1px solid #dfe1f0;
+      padding: 40px 48px; text-align: center; max-width: 520px;
+      box-shadow: 0 2px 12px rgba(56,57,119,0.08);
     }
-    .title { font-size: 1.6rem; font-weight: 700; color: var(--navy); }
-    .subtitle { font-size: 0.85rem; color: var(--muted); margin-top: 4px; }
-    .as-of { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
-
-    .kpi-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0 24px; }
-    .kpi-card {
-      background: var(--card); border-radius: 12px; border: 1px solid var(--border);
-      padding: 14px 16px; box-shadow: 0 2px 8px rgba(56,57,119,0.06);
-    }
-    .kpi-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.12em; color: var(--muted); margin-bottom: 4px; }
-    .kpi-value { font-size: 1.5rem; font-weight: 700; color: var(--navy); }
-    .kpi-meta { font-size: 0.7rem; color: var(--muted); margin-top: 3px; }
-
-    .section { margin-top: 24px; }
-    .section-tile {
-      background: #e4e6f4; padding: 10px 16px; border-radius: 8px; margin-bottom: 14px;
-    }
-    .section-tile h2 { margin: 0; font-size: 1.15rem; font-weight: 600; color: var(--navy); }
-    .section-tile p { margin: 3px 0 0; font-size: 0.8rem; color: var(--muted); }
-
-    .grid-2 { display: grid; grid-template-columns: 1.3fr 1fr; gap: 14px; }
-    .panel {
-      background: var(--card); border-radius: 12px; border: 1px solid var(--border);
-      padding: 14px 16px; box-shadow: 0 2px 8px rgba(56,57,119,0.06);
-    }
-    .panel-title { font-size: 0.85rem; font-weight: 600; color: var(--navy); margin-bottom: 2px; }
-    .panel-sub { font-size: 0.72rem; color: var(--muted); margin-bottom: 8px; }
-
-    .view-toggle { display: flex; gap: 6px; margin-bottom: 12px; }
-    .view-toggle button {
-      padding: 6px 14px; border-radius: 6px; border: 1px solid var(--border);
-      background: var(--card); color: var(--navy); font-size: 0.78rem; cursor: pointer;
-      transition: all 0.15s;
-    }
-    .view-toggle button.active { background: var(--navy); color: #fff; border-color: var(--navy); }
-    .view-toggle button:hover:not(.active) { background: #e4e6f4; }
-
-    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-    th, td { padding: 7px 6px; border-bottom: 1px solid var(--border); text-align: left; }
-    th { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); }
-    tr:last-child td { border-bottom: none; }
-
-    .placeholder-msg {
-      text-align: center; padding: 40px 20px; color: var(--muted); font-size: 0.9rem;
-    }
-    .placeholder-msg code { background: #e4e6f4; padding: 2px 6px; border-radius: 4px; font-size: 0.8rem; }
-
-    @media (max-width: 900px) {
-      .kpi-row { grid-template-columns: 1fr 1fr; }
-      .grid-2 { grid-template-columns: 1fr; }
+    h1 { font-size: 1.4rem; margin: 0 0 12px; }
+    p { font-size: 0.9rem; color: #6b6ba3; line-height: 1.5; }
+    code {
+      background: #e4e6f4; padding: 2px 8px; border-radius: 4px;
+      font-size: 0.82rem;
     }
   </style>
 </head>
 <body>
-  <div class="page">
-    <div class="header">
-      <div>
-        <div class="title">Geo Insights — Snapshot</div>
-        <div class="subtitle">Static export of the Streamlit geo_dashboard.py for embedding into Violet via GitHub Pages</div>
-      </div>
-      <div class="as-of" id="asOfLabel">Placeholder — awaiting data export</div>
-    </div>
-
-    <div class="kpi-row">
-      <div class="kpi-card">
-        <div class="kpi-label">Customers</div>
-        <div class="kpi-value" id="kpiCustomers">–</div>
-        <div class="kpi-meta">Unique customers (last 90 days)</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Revenue</div>
-        <div class="kpi-value" id="kpiRevenue">–</div>
-        <div class="kpi-meta">Total revenue after discount</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Active Houses</div>
-        <div class="kpi-value" id="kpiHouses">–</div>
-        <div class="kpi-meta">Distinct houses in period</div>
-      </div>
-    </div>
-
-    <!-- Distance Bands + Top Cities -->
-    <div class="section grid-2">
-      <div class="panel">
-        <div class="panel-title">Population by Distance Band</div>
-        <div class="panel-sub">Aggregated across all houses</div>
-        <div id="distChart" style="width:100%;height:280px"></div>
-      </div>
-      <div class="panel">
-        <div class="panel-title">Top 10 Cities</div>
-        <div class="panel-sub">By unique customers</div>
-        <table id="cityTable"><thead><tr><th>City</th><th>Customers</th><th>Revenue</th></tr></thead><tbody></tbody></table>
-      </div>
-    </div>
-
-    <!-- Geo Composition Over Time -->
-    <div class="section">
-      <div class="section-tile">
-        <h2>Geo Composition Over Time</h2>
-        <p>Weekly distance-band mix by house and event</p>
-      </div>
-      <div class="panel">
-        <div class="view-toggle">
-          <button id="btnPct" class="active" onclick="setGeoView('pct')">Percentage</button>
-          <button id="btnAbs" onclick="setGeoView('abs')">Absolute</button>
-        </div>
-        <div id="geoChart" style="width:100%;height:420px"></div>
-      </div>
-    </div>
-
-    <!-- House Summary -->
-    <div class="section">
-      <div class="section-tile">
-        <h2>House Summary</h2>
-        <p>Customers and revenue per house</p>
-      </div>
-      <div class="panel">
-        <div id="houseChart" style="width:100%;height:320px"></div>
-      </div>
-    </div>
-
-    <div class="placeholder-msg">
-      <p>This is a placeholder page. To populate with real data, run:</p>
-      <p><code>python geo_snapshot_export.py</code></p>
-      <p>Then commit and push the updated <code>index.html</code>.</p>
-    </div>
+  <div class="card">
+    <h1>Geo Insights — Snapshot</h1>
+    <p>This page will be replaced with the full dashboard export.</p>
+    <p>Run <code>python geo_snapshot_export.py</code> from the
+       <code>data_analyst_repository</code> directory to generate the
+       real dashboard, then push the updated <code>index.html</code>.</p>
   </div>
-
-  <script>
-    // ── Embedded snapshot data (generated by geo_snapshot_export.py) ──
-    // When geo_snapshot_export.py runs, it replaces this entire file with
-    // real data embedded inline. This placeholder has no data.
-    const DATA = {"as_of": null, "kpis": {"total_customers": 0, "total_revenue": 0, "total_houses": 0}, "distance_bands": [], "top_cities": [], "geo_weekly": [], "houses": []};
-
-    const PAL = {
-      '1. 0-50 km':    '#383977', '2. 50-100 km':  '#836DFF',
-      '3. 100-200 km': '#5CB8B2', '4. 200-300 km': '#E6A832',
-      '5. 300-500 km': '#D4544A', '6. 500+ km':    '#B8B8B8',
-      '0-50 km': '#383977',   '50-100 km': '#836DFF',
-      '100-200 km': '#5CB8B2','200-300 km': '#E6A832',
-      '300-500 km': '#D4544A','500+ km': '#B8B8B8',
-    };
-    const BAND_ORDER = ['1. 0-50 km','2. 50-100 km','3. 100-200 km','4. 200-300 km','5. 300-500 km','6. 500+ km'];
-    const PLOTLY_BG = '#f0f2fc';
-    const FONT_COLOR = '#383977';
-
-    function fmt(x) { return x.toLocaleString('en-GB'); }
-    function fmtMoney(x) { return '€' + x.toLocaleString('en-GB', {minimumFractionDigits: 0, maximumFractionDigits: 0}); }
-
-    function renderKpis() {
-      if (DATA.as_of) document.getElementById('asOfLabel').textContent = 'Snapshot as of ' + DATA.as_of;
-      const k = DATA.kpis || {};
-      if (k.total_customers) document.getElementById('kpiCustomers').textContent = fmt(k.total_customers);
-      if (k.total_revenue) document.getElementById('kpiRevenue').textContent = fmtMoney(k.total_revenue);
-      if (k.total_houses) document.getElementById('kpiHouses').textContent = fmt(k.total_houses);
-    }
-
-    function renderDistChart() {
-      const bands = DATA.distance_bands || [];
-      if (!bands.length) { document.getElementById('distChart').innerHTML = '<p style="color:var(--muted);text-align:center;padding-top:20px">Awaiting data export</p>'; return; }
-      const trace = {
-        x: bands.map(d => d.label), y: bands.map(d => d.population_pct),
-        type: 'bar',
-        marker: { color: bands.map(d => PAL[d.label] || '#836DFF') },
-        hovertemplate: '%{x}<br>%{y:.1f}%<br>Pop: %{customdata:,.0f}<extra></extra>',
-        customdata: bands.map(d => d.population),
-      };
-      Plotly.newPlot('distChart', [trace], {
-        margin: {l:42, r:10, t:10, b:90},
-        paper_bgcolor: PLOTLY_BG, plot_bgcolor: PLOTLY_BG,
-        font: {color: FONT_COLOR}, xaxis: {tickangle: -35}, yaxis: {title: '% of population'},
-      }, {displayModeBar: false, responsive: true});
-    }
-
-    function renderCityTable() {
-      const rows = DATA.top_cities || [];
-      const tbody = document.querySelector('#cityTable tbody');
-      tbody.innerHTML = '';
-      if (!rows.length) { tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">Awaiting data export</td></tr>'; return; }
-      rows.forEach(r => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = '<td>' + (r.city||'—') + '</td><td>' + fmt(r.customers||0) + '</td><td>' + fmtMoney(r.revenue||0) + '</td>';
-        tbody.appendChild(tr);
-      });
-    }
-
-    let currentGeoView = 'pct';
-    function setGeoView(mode) {
-      currentGeoView = mode;
-      document.getElementById('btnPct').className = mode === 'pct' ? 'active' : '';
-      document.getElementById('btnAbs').className = mode === 'abs' ? 'active' : '';
-      renderGeoChart();
-    }
-
-    function renderGeoChart() {
-      const weekly = DATA.geo_weekly || [];
-      if (!weekly.length) { document.getElementById('geoChart').innerHTML = '<p style="color:var(--muted);text-align:center;padding-top:20px">Awaiting data export</p>'; return; }
-      const seen = new Set(); const xOrder = [];
-      weekly.forEach(d => { if (!seen.has(d.label)) { seen.add(d.label); xOrder.push(d.label); } });
-      const byBand = {};
-      weekly.forEach(d => { if (!byBand[d.band]) byBand[d.band] = {}; byBand[d.band][d.label] = d; });
-      const yCol = currentGeoView === 'pct' ? 'pct' : 'customers';
-      const yTitle = currentGeoView === 'pct' ? '% of Customers' : 'Customers';
-      const traces = BAND_ORDER.filter(b => byBand[b]).map(band => {
-        const vals = byBand[band];
-        const y = xOrder.map(lbl => vals[lbl] ? vals[lbl][yCol] : 0);
-        if (currentGeoView === 'pct') {
-          return { x: xOrder, y, name: band, type: 'bar', marker: {color: PAL[band]}, hovertemplate: '%{x}<br>%{y:.1f}%<extra>' + band + '</extra>' };
-        }
-        return { x: xOrder, y, name: band, type: 'scatter', mode: 'lines+markers',
-          line: {color: PAL[band], shape: 'spline'}, marker: {color: PAL[band], size: 5},
-          hovertemplate: '%{x}<br>%{y:,.0f}<extra>' + band + '</extra>' };
-      });
-      Plotly.newPlot('geoChart', traces, {
-        barmode: currentGeoView === 'pct' ? 'stack' : undefined,
-        margin: {l:50, r:120, t:10, b:130}, paper_bgcolor: PLOTLY_BG, plot_bgcolor: PLOTLY_BG,
-        font: {color: FONT_COLOR},
-        xaxis: {tickangle: -45, type: 'category', categoryorder: 'array', categoryarray: xOrder},
-        yaxis: {title: yTitle, range: currentGeoView === 'pct' ? [0, 100] : undefined},
-        legend: {orientation: 'v', yanchor: 'top', y: 1, xanchor: 'left', x: 1.02},
-      }, {displayModeBar: false, responsive: true});
-    }
-
-    function renderHouseChart() {
-      const houses = DATA.houses || [];
-      if (!houses.length) { document.getElementById('houseChart').innerHTML = '<p style="color:var(--muted);text-align:center;padding-top:20px">Awaiting data export</p>'; return; }
-      const names = houses.map(h => h.house_name);
-      const t1 = { x: names, y: houses.map(h => h.customers||0), name: 'Customers', type: 'bar', marker: {color: '#383977'}, yaxis: 'y1' };
-      const t2 = { x: names, y: houses.map(h => h.revenue||0), name: 'Revenue', type: 'scatter', mode: 'lines+markers',
-        line: {color: '#E6A832'}, marker: {color: '#E6A832'}, yaxis: 'y2' };
-      Plotly.newPlot('houseChart', [t1, t2], {
-        margin: {l:50, r:60, t:10, b:90}, paper_bgcolor: PLOTLY_BG, plot_bgcolor: PLOTLY_BG,
-        font: {color: FONT_COLOR}, xaxis: {tickangle: -35},
-        yaxis: {title: 'Customers'}, yaxis2: {title: 'Revenue (€)', overlaying: 'y', side: 'right', showgrid: false},
-        legend: {orientation: 'h', y: -0.22},
-      }, {displayModeBar: false, responsive: true});
-    }
-
-    renderKpis(); renderDistChart(); renderCityTable(); renderGeoChart(); renderHouseChart();
-  </script>
 </body>
 </html>
