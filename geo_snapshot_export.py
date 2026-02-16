@@ -96,7 +96,7 @@ def _find_seeds_dir(dashboard_dir: Path) -> Path | None:
 
 
 def ensure_map_caches(geo, df, dashboard_dir: Path):
-    """Build plz_map_data.parquet and city_map_data.parquet using PLZ_MERGE_MAP from geo_dashboard.py."""
+    """Build plz_map_data.parquet and city_map_data.parquet from seed CSVs + transaction data."""
     import numpy as np
     plz_cache = Path(geo.PLZ_MAP_CACHE)
     city_cache = Path(geo.CITY_MAP_CACHE)
@@ -112,68 +112,37 @@ def ensure_map_caches(geo, df, dashboard_dir: Path):
 
     print(f"  Building map caches from seeds at {seeds_dir}")
 
-    # Use PLZ_MERGE_MAP from the imported geo_dashboard module
-    merge_map = getattr(geo, 'PLZ_MERGE_MAP', {})
-
     coords = pd.read_csv(seeds_dir / 'dim_plz_coordinates.csv', dtype={'plz_three_digits': str})
     pop = pd.read_csv(seeds_dir / 'dim_plz_population.csv', dtype={'plz_gebiet': str})
     pop = pop.rename(columns={'plz_gebiet': 'plz_three_digits', 'ort': 'plz_ort', 'einwohner': 'population'})
 
-    # ── PLZ map (with Berlin/Hamburg merged) ──
-    plz_df = coords.merge(pop[['plz_three_digits', 'plz_ort', 'population']], on='plz_three_digits', how='left')
-    plz_df['group_key'] = plz_df['plz_three_digits'].map(merge_map).fillna(plz_df['plz_three_digits'])
-    plz_df['w_lat'] = plz_df['latitude'] * plz_df['population'].fillna(0)
-    plz_df['w_lon'] = plz_df['longitude'] * plz_df['population'].fillna(0)
-
-    agg_plz = plz_df.groupby('group_key').agg(
-        w_lat=('w_lat', 'sum'), w_lon=('w_lon', 'sum'),
-        population=('population', 'sum'), plz_ort=('plz_ort', 'first'),
-    ).reset_index()
-    agg_plz['latitude'] = agg_plz['w_lat'] / agg_plz['population'].replace(0, np.nan)
-    agg_plz['longitude'] = agg_plz['w_lon'] / agg_plz['population'].replace(0, np.nan)
-    agg_plz['plz_three_digits'] = agg_plz['group_key']
-    for city_name in merge_map.values():
-        agg_plz.loc[agg_plz['group_key'] == city_name, 'plz_ort'] = city_name
-
-    # Transaction aggregates — normalize PLZ codes before grouping
-    txn = df.copy()
-    txn['plz_three_digits'] = txn['plz_three_digits'].replace(merge_map)
-    txn_plz = txn.groupby('plz_three_digits').agg(
+    # Transaction aggregates by PLZ
+    txn_plz = df.groupby('plz_three_digits').agg(
         customers=('customer_id', 'nunique'),
         revenue=('variant_price_after_discount', 'sum'),
     ).reset_index()
 
-    result_plz = agg_plz[['plz_three_digits', 'plz_ort', 'latitude', 'longitude', 'population']].merge(
-        txn_plz, on='plz_three_digits', how='left')
-    result_plz['customers'] = result_plz['customers'].fillna(0).astype(int)
-    result_plz['revenue'] = result_plz['revenue'].fillna(0)
-    result_plz['population'] = result_plz['population'].fillna(0).astype(int)
-    result_plz.to_parquet(plz_cache, index=False)
-    print(f"    Written {plz_cache.name} ({len(result_plz)} rows)")
+    # PLZ map: merge coords + population + transaction data
+    plz_df = coords.merge(pop[['plz_three_digits', 'plz_ort', 'population']], on='plz_three_digits', how='left')
+    plz_df = plz_df.merge(txn_plz, on='plz_three_digits', how='left')
+    plz_df['customers'] = plz_df['customers'].fillna(0).astype(int)
+    plz_df['revenue'] = plz_df['revenue'].fillna(0)
+    plz_df['population'] = plz_df['population'].fillna(0).astype(int)
+    plz_df.to_parquet(plz_cache, index=False)
+    print(f"    Written {plz_cache.name} ({len(plz_df)} rows)")
 
-    # ── City map (reads city_population.csv if available, same as dashboard) ──
-    city_pop_path = Path(geo.CITY_POP_PATH)
-    if city_pop_path.exists():
-        city_pop = pd.read_csv(city_pop_path)
-    else:
-        # Fallback: aggregate from seed using merge_map
-        pop['city'] = pop['plz_three_digits'].map(merge_map).fillna(pop['plz_ort'])
-        city_pop = pop.groupby('city').agg(population=('population', 'sum')).reset_index()
-
-    plz_df['city'] = plz_df['group_key']
-    plz_df.loc[~plz_df['plz_three_digits'].isin(merge_map), 'city'] = plz_df['plz_ort']
-    city_coords = plz_df.groupby('city').agg(
-        w_lat=('w_lat', 'sum'), w_lon=('w_lon', 'sum'), _pop=('population', 'sum'),
-    ).reset_index()
-    city_coords['latitude'] = city_coords['w_lat'] / city_coords['_pop'].replace(0, np.nan)
-    city_coords['longitude'] = city_coords['w_lon'] / city_coords['_pop'].replace(0, np.nan)
+    # City map: aggregate population + transactions by city (plz_ort)
+    city_pop = pop.groupby('plz_ort').agg(population=('population', 'sum')).reset_index().rename(columns={'plz_ort': 'city'})
+    # City coords = mean of PLZ coords within each city
+    plz_with_city = coords.merge(pop[['plz_three_digits', 'plz_ort']], on='plz_three_digits', how='left')
+    city_coords = plz_with_city.groupby('plz_ort').agg(latitude=('latitude', 'mean'), longitude=('longitude', 'mean')).reset_index().rename(columns={'plz_ort': 'city'})
 
     txn_city = df.groupby('city').agg(
         customers=('customer_id', 'nunique'),
         revenue=('variant_price_after_discount', 'sum'),
     ).reset_index()
 
-    city_df = city_pop.merge(city_coords[['city', 'latitude', 'longitude']], on='city', how='left')
+    city_df = city_pop.merge(city_coords, on='city', how='left')
     city_df = city_df.merge(txn_city, on='city', how='left')
     city_df['customers'] = city_df['customers'].fillna(0).astype(int)
     city_df['revenue'] = city_df['revenue'].fillna(0)
@@ -261,21 +230,23 @@ def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = No
                     dff, cm, selected_platforms=cp_options
                 )
 
-    # Build city performance table (Top 20) — same logic as geo_dashboard.py line 1220-1240
+    # Build city performance table (Top 20)
     import numpy as np
     city_table_html = ''
-    city_pop_path = Path(geo.CITY_POP_PATH)
-    if city_pop_path.exists() and 'city' in df.columns and 'customer_id' in df.columns:
-        city_pop = pd.read_csv(city_pop_path)
-        city_cust = df.groupby('city').agg(
-            customers=('customer_id', 'nunique'),
-            revenue=('variant_price_after_discount', 'sum'),
-        ).reset_index()
-        city_tbl = city_pop.merge(city_cust, on='city', how='inner')
-        city_tbl['activation'] = (city_tbl['customers'] / (city_tbl['population'] / 1000)).round(2)
-        city_tbl['rev_per_1k'] = (city_tbl['revenue'] / (city_tbl['population'] / 1000)).round(2)
-        city_tbl = city_tbl.sort_values('population', ascending=False).head(20)
-        city_table_html = city_tbl.to_dict(orient='records')
+    if 'city' in df.columns and 'customer_id' in df.columns:
+        seeds_dir = _find_seeds_dir(dashboard_dir) if dashboard_dir else None
+        if seeds_dir and (seeds_dir / 'dim_plz_population.csv').exists():
+            pop_csv = pd.read_csv(seeds_dir / 'dim_plz_population.csv', dtype={'plz_gebiet': str})
+            city_pop = pop_csv.groupby('ort').agg(population=('einwohner', 'sum')).reset_index().rename(columns={'ort': 'city'})
+            city_cust = df.groupby('city').agg(
+                customers=('customer_id', 'nunique'),
+                revenue=('variant_price_after_discount', 'sum'),
+            ).reset_index()
+            city_tbl = city_pop.merge(city_cust, on='city', how='inner')
+            city_tbl['activation'] = (city_tbl['customers'] / (city_tbl['population'] / 1000)).round(2)
+            city_tbl['rev_per_1k'] = (city_tbl['revenue'] / (city_tbl['population'] / 1000)).round(2)
+            city_tbl = city_tbl.sort_values('population', ascending=False).head(20)
+            city_table_html = city_tbl.to_dict(orient='records')
 
     return figures, city_table_html
 
