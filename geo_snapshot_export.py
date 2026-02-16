@@ -220,6 +220,20 @@ def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = No
     figures = {}
     city_tables = {}
 
+    # ── Maps (Section 1) — generated once, shared across all filter combos ──
+    # Maps use the full dataset (no FTB/RB or renewals filter) to keep
+    # the page lightweight (4 mapbox GL instances instead of 24).
+    print("  Generating maps (shared across filters)...")
+    if city_map_df is not None:
+        figures['city_map_pop'] = geo.chart_city_map(
+            city_map_df, all_houses_df, metric='population')
+
+    if plz_map_df is not None:
+        for m in ['customers', 'rev_per_1k', 'activation']:
+            figures[f'plz_map_{m}'] = geo.chart_population_map(
+                plz_map_df, all_houses_df, metric=m, filtered_df=df)
+
+    # ── Charts per filter combination ──
     for ftb_label, ftb_tag in FTB_OPTIONS:
         for ren_label, ren_tag in RENEWAL_OPTIONS:
             suffix = f'__{ftb_tag}__{ren_tag}'
@@ -241,16 +255,6 @@ def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = No
             if dff.empty:
                 print(f"    Skipping (no data for {ftb_label} / {ren_label})")
                 continue
-
-            # ── Maps (Section 1) ──
-            if city_map_df is not None:
-                figures[f'city_map_pop{suffix}'] = geo.chart_city_map(
-                    city_map_df, all_houses_df, metric='population')
-
-            if plz_map_df is not None:
-                for m in ['customers', 'rev_per_1k', 'activation']:
-                    figures[f'plz_map_{m}{suffix}'] = geo.chart_population_map(
-                        plz_map_df, all_houses_df, metric=m, filtered_df=dff)
 
             # ── Section 2: Local Impact ──
             for cm in ['6 Distance Bands', '3 Geo Tiers']:
@@ -402,14 +406,20 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
     # ── Assemble main content sections ──
     parts = []
 
-    # Section 1: Geographic Distribution (maps)
+    # Helper for single (non-filtered) charts like maps
+    def get(key, hidden=False):
+        if key in figures:
+            return fig_to_div(figures[key], key, hidden=hidden)
+        return f'<p style="color:{MUTED};font-size:0.8rem">Chart not available (missing cache data)</p>'
+
+    # Section 1: Geographic Distribution (maps — shared across filter combos)
     has_maps = any(k.startswith('city_map') or k.startswith('plz_map') for k in figures)
     if has_maps:
         parts.append(section('Geographic Distribution', 'Population density and customer reach by PLZ area'))
-        map_left = get_all('city_map_pop')
+        map_left = get('city_map_pop')
         map_right = ''
         for m in ['customers', 'rev_per_1k', 'activation']:
-            map_right += get_all(f'plz_map_{m}', base_hidden=(m != 'customers'))
+            map_right += get(f'plz_map_{m}', hidden=(m != 'customers'))
         parts.append(row_2(panel(map_left, 'Population by City'), panel(map_right, 'PLZ Area Map')))
 
     # City Performance Tables (one per filter combo, toggled by JS)
@@ -756,7 +766,23 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
       document.querySelectorAll('[id^="wrap_"]').forEach(el => {{
         const id = el.id.replace('wrap_', '');
 
-        // Every chart ID ends with __<ftb>__<ren>. Check filter match first.
+        // ── Maps: no filter suffix, only toggled by map_metric ──
+        if (id === 'city_map_pop') {{
+          showDiv(el);
+          return;
+        }}
+        if (id.startsWith('plz_map_')) {{
+          (id.replace('plz_map_', '') === mm) ? showDiv(el) : hideDiv(el);
+          return;
+        }}
+
+        // ── All other charts have filter suffix __<ftb>__<ren> ──
+        if (!id.includes('__')) {{
+          // Unknown chart without suffix — leave visible
+          return;
+        }}
+
+        // Check filter match
         if (!id.endsWith(filterSuffix)) {{
           hideDiv(el);
           return;
@@ -764,12 +790,6 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
 
         // Strip filter suffix to get the base chart key
         const base = id.slice(0, id.length - filterSuffix.length);
-
-        // Map charts
-        if (base.startsWith('plz_map_')) {{
-          (base.replace('plz_map_', '') === mm) ? showDiv(el) : hideDiv(el);
-          return;
-        }}
 
         // Charts depending on color_mode only
         const cmOnly = ['comp_pct_', 'fts_', 'ltv_', 'pop_house_', 'geo_mix_', 'platform_'];
@@ -796,7 +816,7 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
         }}
 
         // Always visible (within active filter group)
-        if (base === 'act_by_house' || base === 'city_map_pop') {{
+        if (base === 'act_by_house') {{
           showDiv(el);
         }}
       }});
