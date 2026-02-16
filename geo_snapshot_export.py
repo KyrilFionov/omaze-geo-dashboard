@@ -284,8 +284,10 @@ def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = No
 # 4. Build the HTML page
 # =============================================================================
 
-def fig_to_div(fig, div_id: str, hidden: bool = False) -> str:
+def fig_to_div(fig, div_id: str, hidden: bool = False, strip_title: bool = False) -> str:
     """Convert a Plotly figure to an HTML div (no full page, CDN plotly)."""
+    if strip_title:
+        fig = fig.update_layout(title=None)
     inner = fig.to_html(full_html=False, include_plotlyjs=False, div_id=div_id)
     display = 'none' if hidden else 'block'
     return f'<div id="wrap_{div_id}" style="display:{display}">{inner}</div>'
@@ -320,22 +322,23 @@ def build_html(figures: dict, geo_module, city_table_data=None) -> str:
                    f'<div style="font-size:0.72rem;color:{MUTED};margin-bottom:8px">{sub}</div>')
         return (f'<div class="chart-panel">{hdr}{content}</div>')
 
-    def get(key, hidden=False):
+    def get(key, hidden=False, strip_title=False):
         if key in figures:
-            return fig_to_div(figures[key], key, hidden=hidden)
+            return fig_to_div(figures[key], key, hidden=hidden, strip_title=strip_title)
         return f'<p style="color:{MUTED};font-size:0.8rem">Chart not available (missing cache data)</p>'
 
     # ── Assemble main content sections ──
     parts = []
 
     # Section 1: Geographic Distribution (maps)
+    # strip_title=True because panel headers already label these
     if any(k.startswith('city_map') or k.startswith('plz_map') for k in figures):
         parts.append(section('Geographic Distribution', 'Population density and customer reach by PLZ area'))
-        map_left = get('city_map_pop')
+        map_left = get('city_map_pop', strip_title=True)
         map_right = ''.join([
-            get('plz_map_customers', hidden=False),
-            get('plz_map_rev_per_1k', hidden=True),
-            get('plz_map_activation', hidden=True),
+            get('plz_map_customers', hidden=False, strip_title=True),
+            get('plz_map_rev_per_1k', hidden=True, strip_title=True),
+            get('plz_map_activation', hidden=True, strip_title=True),
         ])
         parts.append(row_2(panel(map_left, 'Population by City'), panel(map_right, 'PLZ Area Map')))
 
