@@ -29,6 +29,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pandas as pd
+
 
 # =============================================================================
 # 1. Mock Streamlit so geo_dashboard.py can be imported without running the app
@@ -78,10 +80,82 @@ def _import_dashboard(dashboard_path: Path):
 
 
 # =============================================================================
-# 2. Generate all chart figures using the real chart functions
+# 2. Build map parquet caches if missing (from seed CSVs + transaction data)
 # =============================================================================
 
-def generate_figures(geo, refresh: bool = False):
+def _find_seeds_dir(dashboard_dir: Path) -> Path | None:
+    """Locate the dbt seeds directory (contains dim_plz_*.csv)."""
+    candidates = [
+        dashboard_dir.parent / 'seeds',
+        dashboard_dir.parent.parent / 'seeds',
+    ]
+    for d in candidates:
+        if (d / 'dim_plz_coordinates.csv').exists():
+            return d
+    return None
+
+
+def ensure_map_caches(geo, df, dashboard_dir: Path):
+    """Build plz_map_data.parquet and city_map_data.parquet from seed CSVs + transaction data."""
+    import numpy as np
+    plz_cache = Path(geo.PLZ_MAP_CACHE)
+    city_cache = Path(geo.CITY_MAP_CACHE)
+
+    if plz_cache.exists() and city_cache.exists():
+        print("  Map caches already exist — skipping rebuild")
+        return
+
+    seeds_dir = _find_seeds_dir(dashboard_dir)
+    if seeds_dir is None:
+        print("  WARNING: Cannot find seeds directory (dim_plz_coordinates.csv) — maps will be skipped")
+        return
+
+    print(f"  Building map caches from seeds at {seeds_dir}")
+
+    coords = pd.read_csv(seeds_dir / 'dim_plz_coordinates.csv', dtype={'plz_three_digits': str})
+    pop = pd.read_csv(seeds_dir / 'dim_plz_population.csv', dtype={'plz_gebiet': str})
+    pop = pop.rename(columns={'plz_gebiet': 'plz_three_digits', 'ort': 'plz_ort', 'einwohner': 'population'})
+
+    # Transaction aggregates by PLZ
+    txn_plz = df.groupby('plz_three_digits').agg(
+        customers=('customer_id', 'nunique'),
+        revenue=('variant_price_after_discount', 'sum'),
+    ).reset_index()
+
+    # PLZ map: merge coords + population + transaction data
+    plz_df = coords.merge(pop[['plz_three_digits', 'plz_ort', 'population']], on='plz_three_digits', how='left')
+    plz_df = plz_df.merge(txn_plz, on='plz_three_digits', how='left')
+    plz_df['customers'] = plz_df['customers'].fillna(0).astype(int)
+    plz_df['revenue'] = plz_df['revenue'].fillna(0)
+    plz_df['population'] = plz_df['population'].fillna(0).astype(int)
+    plz_df.to_parquet(plz_cache, index=False)
+    print(f"    Written {plz_cache.name} ({len(plz_df)} rows)")
+
+    # City map: aggregate population + transactions by city (plz_ort)
+    city_pop = pop.groupby('plz_ort').agg(population=('population', 'sum')).reset_index().rename(columns={'plz_ort': 'city'})
+    # City coords = mean of PLZ coords within each city
+    plz_with_city = coords.merge(pop[['plz_three_digits', 'plz_ort']], on='plz_three_digits', how='left')
+    city_coords = plz_with_city.groupby('plz_ort').agg(latitude=('latitude', 'mean'), longitude=('longitude', 'mean')).reset_index().rename(columns={'plz_ort': 'city'})
+
+    txn_city = df.groupby('city').agg(
+        customers=('customer_id', 'nunique'),
+        revenue=('variant_price_after_discount', 'sum'),
+    ).reset_index()
+
+    city_df = city_pop.merge(city_coords, on='city', how='left')
+    city_df = city_df.merge(txn_city, on='city', how='left')
+    city_df['customers'] = city_df['customers'].fillna(0).astype(int)
+    city_df['revenue'] = city_df['revenue'].fillna(0)
+    city_df['spc'] = (city_df['revenue'] / city_df['customers'].replace(0, np.nan)).fillna(0).round(2)
+    city_df.to_parquet(city_cache, index=False)
+    print(f"    Written {city_cache.name} ({len(city_df)} rows)")
+
+
+# =============================================================================
+# 3. Generate all chart figures using the real chart functions
+# =============================================================================
+
+def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = None):
     """Call every chart function from geo_dashboard and return named figures."""
     figures = {}
 
@@ -95,7 +169,11 @@ def generate_figures(geo, refresh: bool = False):
     dff_all = df.copy()
     dff_base = df.copy()
 
-    # Maps (Section 1) — may be None if parquet caches don't exist
+    # Build map caches if missing
+    if dashboard_dir:
+        ensure_map_caches(geo, df, dashboard_dir)
+
+    # Maps (Section 1)
     plz_map_df = geo.load_plz_map_data()
     city_map_df = geo.load_city_map_data()
 
@@ -478,7 +556,7 @@ def main():
     geo = _import_dashboard(dashboard_path)
 
     print("Generating figures (this may take a moment)...")
-    figures = generate_figures(geo, refresh=args.fresh)
+    figures = generate_figures(geo, refresh=args.fresh, dashboard_dir=dashboard_path.parent)
     print(f"  Generated {len(figures)} chart(s)")
 
     print("Building HTML...")
