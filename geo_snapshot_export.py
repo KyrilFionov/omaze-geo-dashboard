@@ -319,11 +319,35 @@ def generate_figures(geo, refresh: bool = False, dashboard_dir: Path | None = No
 # 4. Build the HTML page
 # =============================================================================
 
+def _is_mapbox_fig(fig) -> bool:
+    """Check if a Plotly figure contains mapbox traces."""
+    for trace in fig.data:
+        if hasattr(trace, 'type') and 'mapbox' in str(trace.type):
+            return True
+    return False
+
+
 def fig_to_div(fig, div_id: str, hidden: bool = False) -> str:
-    """Convert a Plotly figure to an HTML div (no full page, CDN plotly)."""
+    """Convert a Plotly figure to an HTML div (no full page, CDN plotly).
+
+    For mapbox charts, uses visibility:hidden + position:absolute instead of
+    display:none so the GL context can still initialize (mapbox requires a
+    non-zero-dimension container to load tiles).
+    """
     inner = fig.to_html(full_html=False, include_plotlyjs=False, div_id=div_id)
-    display = 'none' if hidden else 'block'
-    return f'<div id="wrap_{div_id}" style="display:{display}">{inner}</div>'
+    is_map = _is_mapbox_fig(fig)
+
+    if hidden:
+        if is_map:
+            # Keep in the flow at 0 opacity so mapbox GL can init
+            style = 'visibility:hidden;position:absolute;left:-9999px;width:100%;height:600px'
+        else:
+            style = 'display:none'
+    else:
+        style = 'display:block'
+
+    data_attr = ' data-mapbox="1"' if is_map else ''
+    return f'<div id="wrap_{div_id}" style="{style}"{data_attr}>{inner}</div>'
 
 
 def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict = None) -> str:
@@ -702,13 +726,39 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
       const rn = activeState.renewals;
       const filterSuffix = `__${{ct}}__${{rn}}`;
 
+      // Helpers for show/hide that respect mapbox divs
+      function showDiv(el) {{
+        if (el.dataset.mapbox) {{
+          el.style.visibility = 'visible';
+          el.style.position = 'relative';
+          el.style.left = '0';
+          el.style.height = '';
+        }} else {{
+          el.style.display = 'block';
+        }}
+      }}
+      function hideDiv(el) {{
+        if (el.dataset.mapbox) {{
+          el.style.visibility = 'hidden';
+          el.style.position = 'absolute';
+          el.style.left = '-9999px';
+          el.style.height = '600px';
+        }} else {{
+          el.style.display = 'none';
+        }}
+      }}
+      function isVisible(el) {{
+        if (el.dataset.mapbox) return el.style.visibility !== 'hidden';
+        return el.style.display !== 'none';
+      }}
+
       // Toggle chart divs
       document.querySelectorAll('[id^="wrap_"]').forEach(el => {{
         const id = el.id.replace('wrap_', '');
 
         // Every chart ID ends with __<ftb>__<ren>. Check filter match first.
         if (!id.endsWith(filterSuffix)) {{
-          el.style.display = 'none';
+          hideDiv(el);
           return;
         }}
 
@@ -717,7 +767,7 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
 
         // Map charts
         if (base.startsWith('plz_map_')) {{
-          el.style.display = (base.replace('plz_map_', '') === mm) ? 'block' : 'none';
+          (base.replace('plz_map_', '') === mm) ? showDiv(el) : hideDiv(el);
           return;
         }}
 
@@ -725,7 +775,7 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
         const cmOnly = ['comp_pct_', 'fts_', 'ltv_', 'pop_house_', 'geo_mix_', 'platform_'];
         for (const prefix of cmOnly) {{
           if (base.startsWith(prefix)) {{
-            el.style.display = (base.slice(prefix.length) === cm) ? 'block' : 'none';
+            (base.slice(prefix.length) === cm) ? showDiv(el) : hideDiv(el);
             return;
           }}
         }}
@@ -734,20 +784,20 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
         if (base.startsWith('comp_') && !base.startsWith('comp_pct_')) {{
           const rest = base.replace('comp_', '');
           const parts = rest.split('_');
-          el.style.display = (parts[0] === vm && parts[1] === cm) ? 'block' : 'none';
+          (parts[0] === vm && parts[1] === cm) ? showDiv(el) : hideDiv(el);
           return;
         }}
 
         // Activation charts: act_mode + color_mode
         if (base.startsWith('act_weekly_') || base.startsWith('act_cumul_')) {{
           const parts = base.split('_');
-          el.style.display = (parts[1] === am && parts[2] === cm) ? 'block' : 'none';
+          (parts[1] === am && parts[2] === cm) ? showDiv(el) : hideDiv(el);
           return;
         }}
 
         // Always visible (within active filter group)
         if (base === 'act_by_house' || base === 'city_map_pop') {{
-          el.style.display = 'block';
+          showDiv(el);
         }}
       }});
 
@@ -756,15 +806,21 @@ def build_html(figures: dict, geo_module, city_tables: dict = None, meta: dict =
         el.style.display = (el.dataset.cityTable === filterSuffix) ? 'block' : 'none';
       }});
 
-      // Resize newly visible Plotly charts
+      // Resize and relayout newly visible Plotly charts (especially maps)
       setTimeout(() => {{
         document.querySelectorAll('[id^="wrap_"]').forEach(el => {{
-          if (el.style.display !== 'none') {{
+          if (isVisible(el)) {{
             const p = el.querySelector('.js-plotly-plot');
-            if (p) Plotly.Plots.resize(p);
+            if (p) {{
+              Plotly.Plots.resize(p);
+              // Force mapbox tile reload
+              if (el.dataset.mapbox) {{
+                Plotly.relayout(p, {{}});
+              }}
+            }}
           }}
         }});
-      }}, 50);
+      }}, 150);
     }}
 
     window.addEventListener('load', applyVisibility);
